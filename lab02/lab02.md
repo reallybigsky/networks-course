@@ -154,7 +154,7 @@ $$\sum_{i=12}^{20} C_{60}^{i} \cdot 0.2^{i} \cdot 0.8^{60-i} = 0.5464$$
 #### Решение
 Найдем общую задержку передачи файла. Всего пакетов $P = \lceil \dfrac{X}{S} \rceil$, $N=3$.
 
-Тогда $d_{\text{общая сквозная}} = (3 + \lceil \dfrac{X}{S} \rceil - 1)\dfrac{80 + S}{R} = \dfrac{(2 + \dfrac{X}{S})(80 + S)}{R} = \dfrac{2S^2 + 160S + XS + 80X}{SR}$
+Тогда $d_{\text{общая сквозная}} = (3 + \lceil \dfrac{X}{S} \rceil - 1)\dfrac{80 + S}{R} = \dfrac{(2 + \dfrac{X}{S})(80 + S)}{R} = \dfrac{(2S + X)(80 + S)}{SR} = \dfrac{2S^2 + 160S + XS + 80X}{SR}$
 
 Возьмем производную по $S$: $d'_{\text{общая сквозная}} = \dfrac{2}{R} - \dfrac{80X}{S^2}=0$
 Тогда минимум будет достигаться в точке $S=\sqrt{40XR}$
@@ -170,4 +170,4 @@ $$\sum_{i=12}^{20} C_{60}^{i} \cdot 0.2^{i} \cdot 0.8^{60-i} = 0.5464$$
 
 $$d_{\text{общая}} = d_{\text{ожидания}} + d_{\text{передачи}} = \dfrac{I \cdot L}{R (1 – I)} + \dfrac{L}{R} = \dfrac{L}{R}(\dfrac{I}{1-I}+1) = \dfrac{L}{R (1 – I)}$$
 
-$$d_{\text{общая}} = \dfrac{L}{R (1 – I)} = \dfrac{L}{R (1 – \dfrac{L a}{R})}$$
+$$d_{\text{общая}} = \dfrac{L}{R (1 – I)} = \dfrac{L}{R (1 – \dfrac{L a}{R})} = |t= \dfrac{L}{R}|= \dfrac{t}{1-at}$$
