@@ -223,7 +223,7 @@ impl ProxyServer {
         let request = builder
             .body(Full::new(proxy_request.body))
             .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
-        
+
         Ok(request)
     }
 
@@ -233,10 +233,9 @@ impl ProxyServer {
             let etag = headers.get("etag").unwrap().to_str().unwrap_or_default().to_string();
             let meta = CachedFileMeta { last_modified, etag: etag.clone() };
 
-            if let Ok(cache_map_json) = std::fs::File::create(proxy_data.cache_meta_path.lock().await.as_str()) {
-                let mut data_file = std::fs::File::create(Self::CACHE_DIR.to_string() + &etag.replace('\"', ""))?;
-                data_file.write_all(&data)?;
+            std::fs::write(Self::CACHE_DIR.to_string() + &etag.replace('\"', ""), data)?;
 
+            if let Ok(cache_map_json) = std::fs::File::create(proxy_data.cache_meta_path.lock().await.as_str()) {
                 let mut cache_map = proxy_data.cache_meta.lock().await;
                 cache_map.insert(cache_key.clone(), meta);
                 serde_json::ser::to_writer_pretty(cache_map_json, cache_map.deref())?;
@@ -314,7 +313,7 @@ impl ProxyServer {
             StatusCode::NOT_MODIFIED if cached_body.is_some() => {
                 println!("CACHE HIT: {}", cache_key);
                 let mut result = Response::new(cached_body.unwrap());
-                *result.status_mut() = StatusCode::OK; 
+                *result.status_mut() = StatusCode::OK;
                 Ok(result.into_parts())
             }
             _ => {
@@ -347,7 +346,7 @@ impl ProxyServer {
     async fn proxy_client(client_req: Request<Incoming>, client_arg: String, client_referer: String, proxy_data: Arc<ProxyData>) -> io::Result<Response<BoxBody<Bytes, hyper::Error>>> {
         let (headers, body) = client_req.into_parts();
         let body = body.collect().await.map_err(|err| Error::new(ErrorKind::BrokenPipe, err))?.to_bytes();
-        
+
         let proxy_request = ProxyRequest { headers, body };
         let (mut response_headers, mut response_body) = Self::send_request(proxy_request.clone(), client_arg, client_referer, proxy_data.clone()).await?;
 
