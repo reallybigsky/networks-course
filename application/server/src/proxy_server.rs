@@ -234,7 +234,7 @@ impl ProxyServer {
             let meta = CachedFileMeta { last_modified, etag: etag.clone() };
 
             if let Ok(cache_map_json) = std::fs::File::create(proxy_data.cache_meta_path.lock().await.as_str()) {
-                let mut data_file = std::fs::File::create(Self::CACHE_DIR.to_string() + &etag)?;
+                let mut data_file = std::fs::File::create(Self::CACHE_DIR.to_string() + &etag.replace('\"', ""))?;
                 data_file.write_all(&data)?;
 
                 let mut cache_map = proxy_data.cache_meta.lock().await;
@@ -252,7 +252,7 @@ impl ProxyServer {
         let Some(cache_map_json) = cache_meta.get(&cache_key) else {
             return None;
         };
-        let Ok(file) = std::fs::File::open(Self::CACHE_DIR.to_string() + &cache_map_json.etag) else {
+        let Ok(file) = std::fs::File::open(Self::CACHE_DIR.to_string() + &cache_map_json.etag.replace('\"', "")) else {
             return None;
         };
         let mut bytes = Vec::new();
