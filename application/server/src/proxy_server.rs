@@ -228,6 +228,11 @@ impl ProxyServer {
     }
 
     async fn put_in_cache(headers: HeaderMap, cache_key: String, proxy_data: Arc<ProxyData>, data: Bytes) -> io::Result<()> {
+        // tricky bug is fixed with this (invalid etag + cache == no data from cache)
+        if data.is_empty() {
+            return Ok(())
+        }
+        
         if headers.get("last-modified").is_some() && headers.get("etag").is_some() {
             let last_modified = headers.get("last-modified").unwrap().to_str().unwrap_or_default().to_string();
             let etag = headers.get("etag").unwrap().to_str().unwrap_or_default().to_string();
