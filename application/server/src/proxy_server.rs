@@ -1,22 +1,23 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::{BufReader, Error, ErrorKind, Read, Write};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
+use std::io::{Error, ErrorKind};
 use std::ops::Deref;
+use std::string::ToString;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-
 use http_body_util::{Empty, Full};
 use http_body_util::{BodyExt, combinators::BoxBody};
-use hyper::{HeaderMap, http, Method, Request, Response, StatusCode};
+use hyper::{HeaderMap, http, Method, Request, Response, StatusCode, Uri};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use tokio::io;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use url::{Position, Url};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[serde(transparent)]
@@ -26,13 +27,14 @@ struct Blacklist {
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 struct CachedFileMeta {
+    uri: String,
+    filename: String,
     last_modified: String,
     etag: String,
 }
 
 struct ProxyData {
-    log_file: Mutex<std::fs::File>,
-    cache_meta_path: Mutex<String>,
+    log_file: Mutex<tokio::fs::File>,
     cache_meta: Mutex<HashMap<String, CachedFileMeta>>,
     blacklist: Blacklist,
 }
@@ -44,7 +46,6 @@ struct ProxyRequest {
 }
 
 pub struct ProxyServer {
-    address: Arc<String>,
     listener: TcpListener,
     data: Arc<ProxyData>,
 }
@@ -55,24 +56,21 @@ impl ProxyServer {
     const CACHE_META: &'static str = "cache_meta.json";
     const BAN_LIST: &'static str = "blacklist.json";
 
+    async fn read_json<T: serde::de::DeserializeOwned + Default>(filename: String) -> io::Result<T> {
+        let mut file = tokio::fs::File::open(filename).await?;
+        let mut file_data = Vec::new();
+        file.read_to_end(&mut file_data).await?;
+        serde_json::from_reader(file.into_std().await).map_err(|err| Error::new(ErrorKind::InvalidData, err))
+    }
+    
     async fn create_data() -> io::Result<ProxyData> {
-        let log_filename = "proxy_session_".to_owned() + &SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().to_string() + ".log";
-        let _ = std::fs::create_dir(Self::CACHE_DIR);
-        let cache_file = OpenOptions::new()
-            .read(true)
-            .open(Self::CACHE_META)?;
-
-        let cache_meta: HashMap<String, CachedFileMeta> = serde_json::from_reader(cache_file).unwrap_or_default();
-
-        let blacklist: Blacklist = if let Ok(banned_list_file) = std::fs::File::open(Self::BAN_LIST) {
-            serde_json::from_reader::<std::fs::File, Blacklist>(banned_list_file).unwrap_or_default()
-        } else {
-            Blacklist::default()
-        };
+        let _ = tokio::fs::create_dir(Self::CACHE_DIR).await;
+        let log_filename = "proxy_session_".to_owned() + &SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string() + ".log";
+        let cache_meta: HashMap<String, CachedFileMeta> = Self::read_json(Self::CACHE_META.to_string()).await.unwrap_or_default();
+        let blacklist: Blacklist = Self::read_json(Self::BAN_LIST.to_string()).await.unwrap_or_default();
 
         Ok(ProxyData {
-            log_file: Mutex::new(std::fs::File::create(log_filename)?),
-            cache_meta_path: Mutex::new(Self::CACHE_META.to_string()),
+            log_file: Mutex::new(tokio::fs::File::create(log_filename).await?),
             cache_meta: Mutex::new(cache_meta),
             blacklist,
         })
@@ -82,20 +80,19 @@ impl ProxyServer {
         let address = format!("{}:{}", Self::IP, port);
         let listener = TcpListener::bind(&address).await?;
         let data = Arc::new(Self::create_data().await?);
-        Ok(Self { address: Arc::new(address), listener, data })
+        Ok(Self { listener, data })
     }
 
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let io = TokioIo::new(stream);
-            let address = Arc::clone(&self.address);
             let data = Arc::clone(&self.data);
 
             tokio::task::spawn(async move {
                 if let Err(err) = http1::Builder::new()
                     .serve_connection(io, service_fn(move |req| {
-                        Self::handle_connection(req, address.clone(), data.clone())
+                        Self::handle_connection(req, data.clone())
                     }))
                     .await
                 {
@@ -119,36 +116,18 @@ impl ProxyServer {
     </html>")
     }
 
-    async fn log_request(method: Method, url: String, status_code: StatusCode, proxy_data: Arc<ProxyData>) -> io::Result<()> {
+    async fn log_request(request_headers: http::request::Parts, response_status: StatusCode, proxy_data: Arc<ProxyData>) -> io::Result<()> {
         let curr_time_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-        let log_str = format!("{} {} {} {}\n", curr_time_ms, method.as_str(), status_code.as_str(), url);
-        proxy_data.log_file.lock().await.write_all(log_str.as_ref())
+        let log_str = format!("{} {} {} {}\n", curr_time_ms, request_headers.method, response_status, request_headers.uri);
+        proxy_data.log_file.lock().await.write_all(log_str.as_ref()).await
     }
 
-    async fn handle_connection(req: Request<Incoming>, server_addr: Arc<String>, proxy_data: Arc<ProxyData>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-        let addr = "http://".to_owned() + &server_addr.to_string() + "/";
-        match (req.method(), req.uri().path_and_query()) {
-            (method, Some(url)) if method == Method::GET || method == Method::POST => {
-                // Раст и его либы не могут в работу с путями в http запросах (как и я мб)
-                // Сделал так, как чувствую
-                let mut arg = url.as_str()[1..].to_string();
-                let referer = match req.headers().get("referer") {
-                    Some(referer) if referer.to_str().is_ok() => {
-                        let referer = referer.to_str().unwrap();
-                        let it = referer.strip_prefix(&addr).unwrap_or(referer);
-                        if let Some(stripped) = url.as_str()[1..].strip_prefix(it) {
-                            arg = "/".to_string() + stripped
-                        } else if !arg.starts_with("http://") && !arg.starts_with("https://") {
-                            arg = "/".to_string() + &arg
-                        }
-                        it.to_string()
-                    }
-                    _ => String::new()
-                };
-                match Self::proxy_client(req, arg, referer, proxy_data).await {
+    async fn handle_connection(req: Request<Incoming>, proxy_data: Arc<ProxyData>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+        match req.method() {
+            &Method::GET | &Method::POST => {
+                match Self::proxy_client(req, proxy_data).await {
                     Ok(res) => Ok(res),
                     Err(err) if err.kind() == ErrorKind::PermissionDenied => {
-                        println!("Err: {:?}", err);
                         let mut response = Response::new(Self::full(Self::format_error(StatusCode::FORBIDDEN, "This site is blacklisted").await));
                         *response.status_mut() = StatusCode::FORBIDDEN;
                         Ok(response)
@@ -160,6 +139,11 @@ impl ProxyServer {
                         Ok(response)
                     }
                 }
+            }
+            &Method::CONNECT => {
+                let mut response = Response::new(Self::full(Self::format_error(StatusCode::PROXY_AUTHENTICATION_REQUIRED, "HTTPS is not supported").await));
+                *response.status_mut() = StatusCode::PROXY_AUTHENTICATION_REQUIRED;
+                Ok(response)
             }
             _ => {
                 let mut not_found = Response::new(Self::empty());
@@ -193,57 +177,49 @@ impl ProxyServer {
         false
     }
 
-    async fn create_request(proxy_request: ProxyRequest, host: String, arg: String, proxy_data: Arc<ProxyData>, cache_key: Option<String>) -> io::Result<Request<Full<Bytes>>> {
+    async fn create_request(headers: http::request::Parts, body: Bytes, entry: Option<CachedFileMeta>) -> io::Result<Request<Full<Bytes>>> {
         let mut builder = Request::builder()
-            .method(&proxy_request.headers.method)
-            .uri(arg)
-            .header(hyper::header::HOST, host);
+            .method(&headers.method)
+            .uri(&headers.uri);
 
-        for (key, value) in proxy_request.headers.headers.iter() {
-            if key.as_str() == "host" {
-                continue;
-            }
-            builder = builder.header(key, value);
-        }
+        builder.headers_mut().ok_or(Error::new(ErrorKind::InvalidData, ""))?.extend(headers.headers);
 
-        if let Some(cache_key_value) = cache_key {
-            let cache_entry = if proxy_request.headers.method == Method::GET {
-                proxy_data.cache_meta.lock().await.get(&cache_key_value).cloned()
-            } else {
-                None
-            };
-
-            if cache_entry.is_some() {
-                builder = builder
-                    .header("if-modified-since", cache_entry.clone().unwrap().last_modified)
-                    .header("if-none-match", cache_entry.clone().unwrap().etag);
-            }
+        if let Some(entry) = entry {
+            builder = builder
+                .header("if-modified-since", entry.last_modified)
+                .header("if-none-match", entry.etag);
         }
 
         let request = builder
-            .body(Full::new(proxy_request.body))
+            .body(Full::new(body))
             .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
 
         Ok(request)
     }
 
+    fn hash_str(str: &str) -> String {
+        let mut hasher: DefaultHasher = DefaultHasher::new();
+        hasher.write(str.as_bytes());
+        hasher.finish().to_string()
+    }
+    
     async fn put_in_cache(headers: HeaderMap, cache_key: String, proxy_data: Arc<ProxyData>, data: Bytes) -> io::Result<()> {
-        // tricky bug is fixed with this (invalid etag + cache == no data from cache)
-        if data.is_empty() {
-            return Ok(())
-        }
-        
         if headers.get("last-modified").is_some() && headers.get("etag").is_some() {
             let last_modified = headers.get("last-modified").unwrap().to_str().unwrap_or_default().to_string();
             let etag = headers.get("etag").unwrap().to_str().unwrap_or_default().to_string();
-            let meta = CachedFileMeta { last_modified, etag: etag.clone() };
+            
+            if etag.contains(['W', '%', ';', '\\', '/']) {
+                return Err(Error::new(ErrorKind::Other, "Invalid etag type"))
+            }
+            let filename = Self::hash_str(&cache_key);
+            let meta = CachedFileMeta { uri: cache_key.clone(), filename: filename.clone(), last_modified, etag};
 
-            std::fs::write(Self::CACHE_DIR.to_string() + &etag.replace('\"', ""), data)?;
+            tokio::fs::write(Self::CACHE_DIR.to_string() + &filename, data).await?;
 
-            if let Ok(cache_map_json) = std::fs::File::create(proxy_data.cache_meta_path.lock().await.as_str()) {
+            if let Ok(cache_map_file) = tokio::fs::File::create(Self::CACHE_META).await {
                 let mut cache_map = proxy_data.cache_meta.lock().await;
                 cache_map.insert(cache_key.clone(), meta);
-                serde_json::ser::to_writer_pretty(cache_map_json, cache_map.deref())?;
+                serde_json::ser::to_writer_pretty(cache_map_file.into_std().await, cache_map.deref())?;
                 println!("SAVED IN CACHE: {}", cache_key);
             }
         }
@@ -251,39 +227,24 @@ impl ProxyServer {
         Ok(())
     }
 
-    async fn check_cache_hit(cache_key: String, proxy_data: Arc<ProxyData>) -> Option<BoxBody<Bytes, hyper::Error>> {
+    async fn check_cache_hit(uri: Uri, proxy_data: Arc<ProxyData>) -> Option<(CachedFileMeta, Bytes)> {
         let cache_meta = proxy_data.cache_meta.lock().await;
-        let Some(cache_map_json) = cache_meta.get(&cache_key) else {
-            return None;
-        };
-        let Ok(file) = std::fs::File::open(Self::CACHE_DIR.to_string() + &cache_map_json.etag.replace('\"', "")) else {
-            return None;
-        };
+        let cache_meta_entry = cache_meta.get(&uri.to_string())?;
+        let file = tokio::fs::File::open(Self::CACHE_DIR.to_string() + &cache_meta_entry.filename).await.ok()?;
         let mut bytes = Vec::new();
-        let Ok(_) = BufReader::new(file).read_to_end(&mut bytes) else {
-            return None;
-        };
-
-        Some(Self::full(bytes))
+        io::BufReader::new(file).read_to_end(&mut bytes).await.ok()?;
+        
+        Some((cache_meta_entry.clone(), Bytes::from(bytes)))
     }
 
-    async fn send_request(proxy_request: ProxyRequest, mut arg: String, referer: String, proxy_data: Arc<ProxyData>) -> io::Result<(http::response::Parts, BoxBody<Bytes, hyper::Error>)> {
-        let url = if !referer.is_empty() {
-            Url::parse(&referer).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
-        } else {
-            let url = Url::parse(&arg).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
-            arg = url[Position::BeforePath..].to_string();
-            url
-        };
-
-        let cache_key = url.to_string() + " +++ " + &arg;
-        let Some(host) = url.host() else {
-            return Err(Error::new(ErrorKind::InvalidInput, ""));
-        };
-        let port = url.port().unwrap_or(80);
+    async fn send_request(proxy_request: ProxyRequest, proxy_data: Arc<ProxyData>) -> io::Result<(http::response::Parts, Bytes)> {
+        let url = &proxy_request.headers.uri;
+        let host = url.host().unwrap_or_default();
+        let port = url.port_u16().unwrap_or(80);
         let address = format!("{}:{}", host, port);
-
-        if Self::check_blacklisted(url[..Position::BeforeQuery].to_string(), proxy_data.clone()) {
+        let cache_key = url.to_string();
+        
+        if Self::check_blacklisted(cache_key.clone(), proxy_data.clone()) {
             return Err(Error::new(ErrorKind::PermissionDenied, ""));
         }
 
@@ -297,14 +258,9 @@ impl ProxyServer {
             }
         });
 
-        let request_method = proxy_request.headers.method.clone();
-        let cached_body = Self::check_cache_hit(cache_key.clone(), proxy_data.clone()).await;
-
-        let request = if cached_body.is_some() {
-            Self::create_request(proxy_request, host.to_string(), arg, proxy_data.clone(), Some(cache_key.clone())).await?
-        } else {
-            Self::create_request(proxy_request, host.to_string(), arg, proxy_data.clone(), None).await?
-        };
+        let (cached_entry, cached_body) = Self::check_cache_hit(url.clone(), proxy_data.clone()).await.unzip();
+        let (proxy_request_headers, proxy_request_body) = (proxy_request.headers, proxy_request.body);
+        let request = Self::create_request(proxy_request_headers.clone(), proxy_request_body, cached_entry).await?;
 
         let response = sender.send_request(request).await
             .map_err(|err| Error::new(ErrorKind::BrokenPipe, err))?;
@@ -312,7 +268,7 @@ impl ProxyServer {
         let (headers, body) = response.into_parts();
         let body = body.collect().await.map_err(|err| Error::new(ErrorKind::BrokenPipe, err))?.to_bytes();
 
-        let _ = Self::log_request(request_method, cache_key.clone(), headers.status, proxy_data.clone()).await;
+        let _ = Self::log_request(proxy_request_headers.clone(), headers.status, proxy_data.clone()).await;
 
         match headers.status {
             StatusCode::NOT_MODIFIED if cached_body.is_some() => {
@@ -323,47 +279,21 @@ impl ProxyServer {
             }
             _ => {
                 let _ = Self::put_in_cache(headers.headers.clone(), cache_key, proxy_data, body.clone()).await;
-                Ok((headers, Self::full(body)))
+                Ok((headers, body))
             }
         }
     }
 
-    async fn handle_redirect(proxy_request: ProxyRequest, mut response_parts: http::response::Parts, proxy_data: Arc<ProxyData>) -> io::Result<(http::response::Parts, BoxBody<Bytes, hyper::Error>)> {
-        const REDIRECTION_LIMIT: i32 = 10;
-
-        let mut response_body = Self::empty();
-        // finite loop to prevent endless redirections and ddos ban
-        for _ in 0..REDIRECTION_LIMIT {
-            match response_parts.headers.get("location") {
-                Some(location) if location.to_str().is_ok() => {
-                    let location_str = location.to_str().map_or("".to_string(), |s| s.to_string());
-                    (response_parts, response_body) = Self::send_request(proxy_request.clone(), location_str, String::new(), proxy_data.clone()).await?;
-                    if response_parts.status != StatusCode::MOVED_PERMANENTLY && response_parts.status != StatusCode::FOUND {
-                        return Ok((response_parts, response_body));
-                    }
-                }
-                _ => { return Ok((response_parts, response_body)); }
-            };
-        }
-        Ok((response_parts, response_body))
-    }
-
-    async fn proxy_client(client_req: Request<Incoming>, client_arg: String, client_referer: String, proxy_data: Arc<ProxyData>) -> io::Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    async fn proxy_client(client_req: Request<Incoming>, proxy_data: Arc<ProxyData>) -> io::Result<Response<BoxBody<Bytes, hyper::Error>>> {
         let (headers, body) = client_req.into_parts();
         let body = body.collect().await.map_err(|err| Error::new(ErrorKind::BrokenPipe, err))?.to_bytes();
 
         let proxy_request = ProxyRequest { headers, body };
-        let (mut response_headers, mut response_body) = Self::send_request(proxy_request.clone(), client_arg, client_referer, proxy_data.clone()).await?;
+        let (response_headers, response_body) = Self::send_request(proxy_request.clone(), proxy_data.clone()).await?;
 
-        if response_headers.status == StatusCode::MOVED_PERMANENTLY || response_headers.status == StatusCode::FOUND {
-            (response_headers, response_body) = Self::handle_redirect(proxy_request, response_headers, proxy_data).await?;
-        }
-
-        let mut result = Response::builder()
-            .status(response_headers.status)
-            .version(response_headers.version);
+        let mut result = Response::builder().status(response_headers.status).version(response_headers.version);
         result.headers_mut().ok_or(Error::new(ErrorKind::InvalidData, ""))?.extend(response_headers.headers);
         result.extensions_mut().ok_or(Error::new(ErrorKind::InvalidData, ""))?.extend(response_headers.extensions);
-        result.body(response_body).map_err(|err| Error::new(ErrorKind::InvalidData, err))
+        result.body(Self::full(response_body)).map_err(|err| Error::new(ErrorKind::InvalidData, err))
     }
 }
