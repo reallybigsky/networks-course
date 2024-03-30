@@ -10,10 +10,8 @@ fun main(args: Array<String>) {
     try {
         val socket = Socket(serverAddr, serverPort)
 
-        Runtime.getRuntime().addShutdownHook(object : Thread(){
+        Runtime.getRuntime().addShutdownHook(object : Thread() {
             override fun run() {
-                socket.shutdownInput()
-                socket.shutdownOutput()
                 socket.close()
                 println("Done")
             }
@@ -26,7 +24,5 @@ fun main(args: Array<String>) {
 
     } catch (exc: Exception) {
         println(exc.message)
-    } finally {
-
     }
 }

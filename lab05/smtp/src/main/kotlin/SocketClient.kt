@@ -1,8 +1,6 @@
 package org.smtp
 
-import jakarta.activation.MimeType
 import java.io.*
-import java.nio.ByteBuffer
 import java.nio.file.Files
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory

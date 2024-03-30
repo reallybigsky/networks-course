@@ -9,7 +9,6 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.util.*
-import kotlin.io.encoding.Base64
 
 
 class SimpleClient(username: String, password: String, serverAddr: String, serverPort: Int) : SMTPClient {
