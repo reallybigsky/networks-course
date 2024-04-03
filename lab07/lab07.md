@@ -274,6 +274,6 @@ HEARTBEAT_PERIOD - задержка между сообщениями с кли�
 
 #### Решение
 
-$$U = n \cdot \dfrac{\dfrac{L}{R}}{RTT + \dfrac{L}{R}} > 98 $$
+$$U = n \cdot \dfrac{\dfrac{L}{R}}{RTT + \dfrac{L}{R}} \gt 98 $$
 
-$$n > 98 \cdot \dfrac{RTT + \dfrac{L}{R}}{\dfrac{L}{R}} = 2450$$
+$$n \gt 98 \cdot \dfrac{RTT + \dfrac{L}{R}}{\dfrac{L}{R}} = 2450$$
