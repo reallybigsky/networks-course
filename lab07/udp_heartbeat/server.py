@@ -37,10 +37,8 @@ if __name__ == '__main__':
             clients[address].last_msg_idx = msg_idx
             clients[address].last_msg_time = msg_time
 
-        except socket.timeout:
-            no_op = 0
-
-        curr_time = time.time()
-        for client in clients.values():
-            if client.last_msg_time + timeout < curr_time:
-                print(f'{time.time()} INFO: Lost heartbeat from {client.addr}, last msg time: {client.last_msg_time}')
+        finally:
+            curr_time = time.time()
+            for client in clients.values():
+                if client.last_msg_time + timeout < curr_time:
+                    print(f'{time.time()} INFO: Lost heartbeat from {client.addr}, last msg time: {client.last_msg_time}')
