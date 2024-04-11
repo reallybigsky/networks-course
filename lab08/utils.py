@@ -1,4 +1,4 @@
-from lab08 import checksum
+import checksum
 import struct
 
 PACKET_DATA_LEN = 1024
@@ -32,4 +32,3 @@ def create_packet(packet_id: int, data: bytes) -> bytes:
     cs = checksum.calc_cs16(buf)
     buf[:CHECKSUM_LEN] = cs.tobytes()
     return buf
-

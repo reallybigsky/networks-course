@@ -1,8 +1,10 @@
-import struct
 import filecmp
-import time
+import os
+import struct
+import sys
 
-from lab08 import server
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import server
 
 if __name__ == '__main__':
     socket = server.Server(8080, 0.05)
@@ -11,18 +13,12 @@ if __name__ == '__main__':
     print("Collecting Alice...")
 
     alice = open("alice_copy.txt", "wb")
-    size = struct.unpack("I", socket.read())[0]
-    curr_size = 0
-
-    while curr_size < size:
-        data = socket.read()
-        alice.write(data)
-        curr_size += len(data)
-
+    size = struct.unpack("I", socket.read(4))[0]
+    data = socket.read(size)
+    alice.write(data)
     alice.close()
 
     print("Got Alice!")
-    time.sleep(5)  # filter ACK from last packet
     print("Sending TL...")
 
     tl = open("TL_doc.pdf", "rb")
