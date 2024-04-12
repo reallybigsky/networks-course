@@ -28,9 +28,18 @@ class Client(object):
         self.buffer = bytearray()
         threading.Thread(target=self.__background_read, daemon=True).start()
 
+        self.send_attempts = 0
+        self.send_real = 0
+        self.received = 0
+
+    def stats(self) -> (int, int, int):
+        return self.send_attempts, self.send_real, self.received
+
     # packet loss imitation
     def send(self, data: bytes):
+        self.send_attempts += 1
         if random.random() > UTILS.PACKET_LOSS:
+            self.send_real += 1
             self.socket.sendto(data, self.other_addr)
 
     def write(self, data: bytes):
@@ -44,6 +53,7 @@ class Client(object):
                     self.send(packet)
                     try:
                         response, _ = self.socket.recvfrom(UTILS.PACKET_LEN)
+                        self.received += 1
                         ack_payload, ok = UTILS.check_packet(self.write_id, response)
                         if ok and ack_payload == UTILS.ACK_MAGIC:
                             break
@@ -69,6 +79,7 @@ class Client(object):
             with self.lock:
                 try:
                     data, addr = self.socket.recvfrom(UTILS.PACKET_LEN)
+                    self.received += 1
                     if addr != self.other_addr:
                         continue
 

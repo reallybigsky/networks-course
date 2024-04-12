@@ -32,3 +32,9 @@ if __name__ == '__main__':
     assert filecmp.cmp("TL_doc.pdf", "TL_doc_copy.pdf")
 
     print("OK!")
+
+    send_attempts, send_real, received = socket.stats()
+    print("STATS:")
+    print("\tAttempts to send: ", send_attempts)
+    print("\tPackets sent: ", send_real)
+    print("\tPackets received: ", received)
